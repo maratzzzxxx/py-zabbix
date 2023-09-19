@@ -18,7 +18,6 @@
 # along with py-zabbix. If not, see <http://www.gnu.org/licenses/>.
 
 from decimal import Decimal
-import inspect
 import json
 import logging
 import socket
@@ -50,7 +49,7 @@ class ZabbixResponse(object):
         self._time = 0
         self._chunk = 0
         pattern = (r'[Pp]rocessed:? (\d*);? [Ff]ailed:? (\d*);? '
-                   r'[Tt]otal:? (\d*);? [Ss]econds spent:? (\d*\.\d*)')
+                   '[Tt]otal:? (\d*);? [Ss]econds spent:? (\d*\.\d*)')
         self._regex = re.compile(pattern)
 
     def __repr__(self):
@@ -121,12 +120,12 @@ class ZabbixMetric(object):
             if isinstance(clock, (float, int)):
                 self.clock = int(clock)
             else:
-                raise ValueError('Clock must be time in unixtime format')
+                raise Exception('Clock must be time in unixtime format')
 
     def __repr__(self):
         """Represent detailed ZabbixMetric view."""
 
-        result = json.dumps(self.__dict__, ensure_ascii=False)
+        result = json.dumps(self.__dict__)
         logger.debug('%s: %s', self.__class__.__name__, result)
 
         return result
@@ -152,22 +151,6 @@ class ZabbixSender(object):
     :type chunk_size: int
     :param chunk_size: Number of metrics send to the server at one time
 
-    :type socket_wrapper: function
-    :param socket_wrapper: to provide a socket wrapper function to be used to
-         wrap the socket connection to zabbix.
-         Example:
-            from pyzabbix import ZabbixSender
-            import ssl
-            secure_connection_option = dict(..)
-            zs = ZabbixSender(
-                zabbix_server=zabbix_server,
-                zabbix_port=zabbix_port,
-                socket_wrapper=lambda sock:ssl.wrap_socket(sock,**secure_connection_option)
-            )
-
-    :type timeout: int
-    :param timeout: Number of seconds before call to Zabbix server times out
-         Default: 10
     >>> from pyzabbix import ZabbixMetric, ZabbixSender
     >>> metrics = []
     >>> m = ZabbixMetric('localhost', 'cpu[usage]', 20)
@@ -180,14 +163,10 @@ class ZabbixSender(object):
                  zabbix_server='127.0.0.1',
                  zabbix_port=10051,
                  use_config=None,
-                 chunk_size=250,
-                 socket_wrapper=None,
-                 timeout=10):
+                 chunk_size=250):
 
         self.chunk_size = chunk_size
-        self.timeout = timeout
 
-        self.socket_wrapper = socket_wrapper
         if use_config:
             self.zabbix_uri = self._load_from_config(use_config)
         else:
@@ -202,8 +181,7 @@ class ZabbixSender(object):
         return result
 
     def _load_from_config(self, config_file):
-        """Load zabbix server IP address and port from zabbix agent config
-        file.
+        """Load zabbix server IP address and port from zabbix agent config file.
 
         If ServerActive variable is not found in the file, it will
         use the default: 127.0.0.1:10051
@@ -215,7 +193,11 @@ class ZabbixSender(object):
         """
 
         if config_file and isinstance(config_file, bool):
-            config_file = '/etc/zabbix/zabbix_agentd.conf'
+            zbxcfgs = ['C:/Zabbix/zabbix_agentd.conf','C:/Program Files/Zabbix Agent/zabbix_agentd.conf', '/etc/zabbix/zabbix_agentd.conf', '/etc/zabbix/zabbix_agent2.conf']
+            for zbxcfg in zbxcfgs:
+                if (os.path.exists(zbxcfg) and os.path.isfile(zbxcfg)):
+                    config_file = zbxcfg
+        print("Used config: %s", config_file)
 
         logger.debug("Used config: %s", config_file)
 
@@ -223,31 +205,14 @@ class ZabbixSender(object):
         with open(config_file, 'r') as f:
             config_file_data = "[root]\n" + f.read()
 
-        params = {}
-
-        try:
-            # python2
-            args = inspect.getargspec(
-                configparser.RawConfigParser.__init__).args
-        except ValueError:
-            # python3
-            args = inspect.getfullargspec(
-                configparser.RawConfigParser.__init__).kwonlyargs
-
-        if 'strict' in args:
-            params['strict'] = False
+        default_params = {
+            'ServerActive': '127.0.0.1:10051',
+        }
 
         config_file_fp = StringIO(config_file_data)
-        config = configparser.RawConfigParser(**params)
-        config.readfp(config_file_fp)
-        # Prefer ServerActive, then try Server and fallback to defaults
-        if config.has_option('root', 'ServerActive'):
-            zabbix_serveractives = config.get('root', 'ServerActive')
-        elif config.has_option('root', 'Server'):
-            zabbix_serveractives = config.get('root', 'Server')
-        else:
-            zabbix_serveractives = '127.0.0.1:10051'
-
+        config = configparser.RawConfigParser(default_params)
+        config.read_file(config_file_fp)
+        zabbix_serveractives = config.get('root', 'ServerActive')
         result = []
         for serverport in zabbix_serveractives.split(','):
             if ':' not in serverport:
@@ -365,7 +330,7 @@ class ZabbixSender(object):
 
         try:
             connection.close()
-        except socket.error:
+        except Exception as err:
             pass
 
         return result
@@ -387,44 +352,27 @@ class ZabbixSender(object):
         for host_addr in self.zabbix_uri:
             logger.debug('Sending data to %s', host_addr)
 
-            try:
-                # IPv4
-                connection_ = socket.socket(socket.AF_INET)
-            except socket.error:
-                # IPv6
-                try:
-                    connection_ = socket.socket(socket.AF_INET6)
-                except socket.error:
-                    raise Exception("Error creating socket for {host_addr}".format(host_addr=host_addr))
-            if self.socket_wrapper:
-                connection = self.socket_wrapper(connection_)
-            else:
-                connection = connection_
+            # create socket object
+            connection = socket.socket()
 
-            connection.settimeout(self.timeout)
+            # server and port must be tuple
+            #print(host_addr)
+            connection.connect(host_addr)
 
             try:
-                # server and port must be tuple
-                connection.connect(host_addr)
                 connection.sendall(packet)
-            except socket.timeout:
-                logger.error('Sending failed: Connection to %s timed out after'
-                             '%d seconds', host_addr, self.timeout)
-                connection.close()
-                raise socket.timeout
-            except socket.error as err:
+            except Exception as err:
                 # In case of error we should close connection, otherwise
-                # we will close it after data will be received.
-                logger.warning('Sending failed: %s', getattr(err, 'msg', str(err)))
+                # we will close it afret data will be received.
                 connection.close()
-                raise err
+                raise Exception(err)
 
             response = self._get_response(connection)
             logger.debug('%s response: %s', host_addr, response)
 
             if response and response.get('response') != 'success':
                 logger.debug('Response error: %s}', response)
-                raise socket.error(response)
+                raise Exception(response)
 
         return response
 
